@@ -1,0 +1,387 @@
+---
+title: "Language Flashcards"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries
+library(plyr)
+library(dplyr)
+library(stringr)
+library(janitor)
+library(googledrive)
+library(googlesheets4)
+library(rmarkdown)
+
+options(gargle_oauth_email = "XXXX@gmail.com")
+googlesheets4::gs4_deauth()
+googlesheets4::gs4_auth(path = 'test-XXXX.json')
+link <- paste0("https://docs.google.com/spreadsheets/d/XXXX")
+
+# See example spreadsheet here: https://docs.google.com/spreadsheets/d/1AdesaT-Gd_CUwUNeodbbaSSRx9vDp1aRTERi_URfg28/edit?gid=0#gid=0
+# Copy the formatting for code to work
+```
+
+This app contains flashcards to help with learning languages. It interacts with a Google Sheet document to quiz the user on a customized list of words in their target language, focusing on areas that require more practice.
+
+To view the Google Sheet, visit [this link](https://docs.google.com/spreadsheets/d/XXXX/edit).
+
+## Set Up
+
+```{r set-up, echo=FALSE}
+# Create field to select language
+selectInput(inputId = "language", label = "Choose language:",
+            choices = head(sheet_names(link), -1))
+
+# Create field to select number of words to test
+numericInput(inputId = "words", label = "Choose number of words to test:",
+             min = 1, max = 1000, value = 50, step = 1)
+
+# Create button to start showing flashcards
+actionButton(inputId = "start", label = "Start")
+
+# Write HTML code for text-to-speech
+tags$script(HTML('
+  Shiny.addCustomMessageHandler("readText", function(data) {
+    var msg = new SpeechSynthesisUtterance(data.message);
+    msg.lang = "zh-CN";  // Set the language to Chinese, change as needed
+    setTimeout(function() {  // Apply the delay dynamically
+      window.speechSynthesis.speak(msg);
+    }, data.delay);  // Use the delay passed from R
+  });
+'))
+```
+
+## Flashcards
+
+```{r test, echo=FALSE}
+
+# Read in data
+table <- eventReactive(input$start, {
+  read_sheet(link, sheet = input$language) %>%
+    # Edit columns
+    mutate(
+      # Create id numbers for the rows that match Google sheets
+      id = row_number() + 2,
+      # Format points as numbers
+      Points = ifelse(is.na(Points), 0, as.numeric(Points)),
+      # Write missing values in notes as blanks
+      Notes = ifelse(is.na(Notes), "", Notes)) %>%
+    # Convert to data frame
+    as.data.frame() %>%
+    # Select rows with complete information
+    filter(Status != "NULL") %>%
+    # Edit columns
+    mutate(
+      # Fix issue with columns appearing as a list
+      Meaning = unlist(Meaning),
+      # Select rows to swap translations
+      swap = sample(c("Yes", "No"), n(), replace = T),
+      # Swap translations for selected rows
+      old_term = Term,
+      Term = ifelse(swap == "Yes", Meaning, Term),
+      Meaning = ifelse(swap == "Yes", old_term, Meaning)) %>%
+    # Remove extra column
+    select(-old_term)
+  })
+
+# Shuffle the flashcards
+flashcards <- eventReactive(input$start, {
+  rows = c()
+  # Calculate draw probability based on points
+  status_sample = rep(rownames(table()), 10 - pmin(table()$Points, 9))
+  # Get row number for each flashcard
+  for(i in 1:input$words){
+    # Get row number of chosen status
+    rows = append(rows, sample(status_sample, 1, replace = T))}
+  rows
+  })
+
+# Initiate the flashcard counter when "start" is selected
+card_num <- reactiveVal(NULL)
+observeEvent(input$start, {
+   card_num(1)
+   })
+
+# Get flashcard index every time an input is selected
+i <- eventReactive(input$start | input$correct | input$incorrect, {
+  flashcards()[card_num()]
+  })
+
+# Initiate answer counters when "start" is selected
+correct_num <- reactiveVal(NULL)
+observeEvent(input$start, {
+  correct_num(0)
+  })
+incorrect_num <- reactiveVal(NULL)
+observeEvent(input$start, {
+  incorrect_num(0)
+  })
+reveal_num <- reactiveVal(NULL)
+observeEvent(input$start, {
+  reveal_num(0)
+  })
+
+# Increase the answer counters after "correct" or "incorrect" is selected
+observeEvent(input$correct, {
+  card_num(card_num() + 1)
+  correct_num(correct_num() + 1)
+  })
+observeEvent(input$incorrect, {
+  card_num(card_num() + 1)
+  incorrect_num(incorrect_num() + 1)
+  })
+observeEvent(input$reveal, {
+  reveal_num(reveal_num() + 1)
+  })
+
+# Create output variables for correct and incorrect numbers
+output$correct_total <- eventReactive(
+  input$start | input$correct, {correct_num()})
+output$incorrect_total <- eventReactive(
+  input$start | input$incorrect, {incorrect_num()})
+output$reveal_total <- eventReactive(
+  input$start | input$reveal, {reveal_num()})
+
+# Hide output variables for correct and incorrect numbers
+outputOptions(output, "correct_total", suspendWhenHidden = FALSE)
+outputOptions(output, "incorrect_total", suspendWhenHidden = FALSE)
+outputOptions(output, "reveal_total", suspendWhenHidden = FALSE)
+
+# Show flashcard until "correct" or "incorrect" button is selected
+conditionalPanel(
+  condition = "input.start > 0 &
+  output.correct_total + output.incorrect_total < input.words",
+  
+  # Prompt with word meaning
+  h3(renderText(table()[i(),]$Meaning[1])),
+
+  # Prompt with action button to show answer
+  actionButton(inputId = "reveal", label = "Reveal")
+  )
+
+# Use text-to-speech on target word
+observeEvent(input$start, {
+  if (table()[i(),]$swap[1] == "Yes" & card_num() < input$words) {
+    meaning <- table()[i(),]$Meaning[1]
+    session$sendCustomMessage(type = "readText", message = list(message = meaning, delay = 0))
+  }
+}, ignoreInit = TRUE)  # Prevent initial triggering
+
+observeEvent(input$correct, {
+  if (table()[i(),]$swap[1] == "Yes" & card_num() < input$words) {
+    meaning <- table()[i(),]$Meaning[1]
+    session$sendCustomMessage(type = "readText", message = list(message = meaning, delay = 2000))
+  }
+}, ignoreInit = TRUE)
+
+observeEvent(input$incorrect, {
+  if (table()[i(),]$swap[1] == "Yes" & card_num() < input$words) {
+    meaning <- table()[i(),]$Meaning[1]
+    session$sendCustomMessage(type = "readText", message = list(message = meaning, delay = 2000))
+  }
+}, ignoreInit = TRUE)
+
+observeEvent(input$reveal, {
+  if (table()[i(),]$swap[1] == "No") {
+    meaning <- table()[i(),]$Term[1]
+    session$sendCustomMessage(type = "readText", message = list(message = meaning, delay = 0))
+  }
+}, ignoreInit = TRUE)  # Prevent initial triggering
+
+# Show flashcard answer until "correct" or "incorrect" button is selected
+conditionalPanel(
+  condition = "(output.reveal_total + output.correct_total + output.incorrect_total)
+  % 2 == 1",
+
+  # Show word, IPA, and any notes if they exist
+  h5(renderText(table()[i(),]$Term[1])),
+  h6(renderText(table()[i(),]$IPA[1])),
+  h6(renderText(table()[i(),]$Notes[1])),
+
+  # Prompt with "correct" and "incorrect" buttons
+  actionButton(inputId = "correct", label = "Correct",
+               style = "padding:10pxl; width:20%"),
+  actionButton(inputId = "incorrect", label = "Incorrect",
+               style = "padding:10pxl; width:20%"))
+
+# Display progress counter
+conditionalPanel(
+  condition = "input.start > 0 && output.correct_total + output.incorrect_total < input.words",
+  textOutput("progress_counter")
+)
+
+# Calculate and render the counter text
+output$progress_counter <- renderText({
+  if (input$start == 0) {
+    return("")  # Return an empty string if the "Start" button hasn't been pressed
+  }
+  current_card <- card_num()
+  total_words <- input$words
+  if (is.null(current_card)) current_card <- 0
+  if (total_words <= 0) total_words <- 1 # Avoid division by zero
+  if (current_card > total_words) current_card <- total_words
+  paste0("\n", current_card, " / ", total_words)
+})
+
+# Get points of current word
+points <- eventReactive(input$correct | input$incorrect, {
+  ifelse(is.na(table()[flashcards()[card_num() - 1],]$Points[1]), 0,
+         as.numeric(table()[flashcards()[card_num() - 1],]$Points[1]))
+  })
+
+# Get row ID of current word
+id <- eventReactive(input$correct | input$incorrect, {
+  table()[flashcards()[min(max(card_num() - 1, 1), input$words)],]$id[1]
+  })
+
+# Update date last reviewed
+observeEvent(input$correct | input$incorrect, {
+    range_write(link, sheet = input$language,
+                data = data.frame(x = Sys.Date()) %>% row_to_names(1),
+                range = paste0("F", id()), reformat = F)
+  })
+
+# Add a point if answer is correct
+observeEvent(input$correct, {
+  range_write(link, sheet = input$language,
+              data = data.frame(setNames(
+                data.frame(matrix(0, nrow = 0, ncol = 1)),
+                as.character(eval(parse(text = paste(points(), "+", 1))))),
+                check.names = F),
+              range = paste0("G", id()), reformat = F)
+  })
+
+# Remove a point to a minimum of zero points if answer is incorrect
+observeEvent(input$incorrect, {
+  range_write(link, sheet = input$language,
+              data = data.frame(setNames(
+                data.frame(matrix(0, nrow = 0, ncol = 1)),
+                as.character(ifelse(
+                  eval(parse(text = paste(points(), "-", 1))) < 1, 0,
+                  eval(parse(text = paste(points(), "-", 1)))))),
+                check.names = F),
+              range = paste0("G", id()), reformat = F)
+  })
+
+# Update status to "Learned" if points are greater or equal to five
+observeEvent(input$correct, {
+  if(points() >= 4) {
+    range_write(link, sheet = input$language,
+                data = data.frame(Learned = character()),
+                range = paste0("D", id()), reformat = F)
+    }
+  })
+
+# Update status to "Learning" if points are between one and four
+observeEvent(input$correct, {
+  if(points() >= 0 & points() <= 3) {
+    range_write(link, sheet = input$language,
+                data = data.frame(Learning = character()),
+                range = paste0("D", id()), reformat = F)
+    }
+  })
+
+# Update status to "Learning" if points are between one and four
+observeEvent(input$incorrect, {
+  if(points() >= 2 & points() <= 5) {
+    range_write(link, sheet = input$language,
+                data = data.frame(Learning = character()),
+                range = paste0("D", id()), reformat = F)
+    }
+  })
+
+# Update status to "Unfamiliar" if points are zero
+observeEvent(input$incorrect, {
+  if(points() <= 1) {
+    range_write(link, sheet = input$language,
+                data = data.frame(Unfamiliar = character()),
+                range = paste0("D", id()), reformat = F)
+    }
+  })
+
+# renderText("Points:")
+# renderText(points())
+# renderText("Id:")
+# renderText(id())
+# renderText("Card number:")
+# renderText(card_num())
+# renderTable(table())
+```
+
+```{r results, echo=FALSE}
+# Show result button when the deck is complete
+conditionalPanel(
+  condition = "output.correct_total + output.incorrect_total == input.words",
+  
+  # Create button to show results
+  actionButton(inputId = "results", label = "Show Results"))
+
+# Read in data
+table_new <- eventReactive(input$results, {
+  read_sheet(link, sheet = input$language) %>%
+    # Edit columns
+    mutate(
+      # Create id numbers for the rows that match Google sheets
+      id = row_number() + 2,
+      # Format points as numbers
+      Points = ifelse(is.na(Points), 0, as.numeric(Points)),
+      # Write missing values in notes as blanks
+      Notes = ifelse(is.na(Notes), "", Notes)) %>%
+    # Convert to data frame
+    as.data.frame() %>%
+    # Select rows with complete information
+    filter(Status != "NULL") %>%
+    # Edit columns
+    mutate(
+      # Fix issue with columns appearing as a list
+      Meaning = unlist(Meaning))
+  })
+  
+# Calculate score for flashcards
+score <- eventReactive(input$results, {
+  paste0("Score: ",
+         formatC(
+           correct_num() / (correct_num() + incorrect_num()) * 100,
+           digits = 1, format = "f"),
+         "%")
+  })
+
+# Calculate progress on overall word list
+progress <- eventReactive(input$results, {
+  paste0("Progress: ",
+         formatC(
+           (nrow(table_new()[table_new()$Status == "Learned",]) +
+            1/2 * nrow(table_new()[table_new()$Status == "Learning",]) + 0)
+           / nrow(table_new()) * 100,
+           digits = 1, format = "f"),
+         "%")
+  })
+
+# Calculate change in progress on overall word list
+change <- eventReactive(input$results, {
+  paste0("Change in Progress: ",
+         formatC(
+           ((nrow(table_new()[table_new()$Status == "Learned",]) +
+              1/2 * nrow(table_new()[table_new()$Status == "Learning",]))
+           / nrow(table_new()) * 100) -
+             ((nrow(table()[table()$Status == "Learned",]) +
+                1/2 * nrow(table()[table()$Status == "Learning",]))
+           / nrow(table()) * 100),
+           digits = 1, format = "f"),
+         "%")
+  })
+
+# Show results when the deck is complete
+conditionalPanel(
+  condition = "input.results % 2 == 1",
+  
+  # Show score and overall progress
+  h5(renderText(score())),
+  h5(renderText(progress())),
+  h5(renderText(change())))
+
+```
