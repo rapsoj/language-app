@@ -30,7 +30,8 @@ This app contains flashcards to help with learning languages. It interacts with 
 rv <- reactiveValues(
   valid_url = NULL,
   sheet_names = NULL,
-  current_word = 1
+  current_word = 1,
+  current_data = NULL
 )
 
 # Create field to input Google Sheet URL
@@ -132,7 +133,8 @@ outputOptions(output, "is_valid_sheet", suspendWhenHidden = FALSE)
 table <- eventReactive(input$start, {
   req(rv$valid_url)  # Ensure we have a valid URL before proceeding
   
-  read_sheet(rv$valid_url, sheet = input$language) %>%
+  # Read and process the initial data
+  rv$current_data <- read_sheet(rv$valid_url, sheet = input$language) %>%
     # Edit columns
     mutate(
       # Create id numbers for the rows that match Google sheets
@@ -157,21 +159,26 @@ table <- eventReactive(input$start, {
       Meaning = ifelse(swap == "Yes", old_term, Meaning)) %>%
     # Remove extra column
     select(-old_term)
+    
+  rv$current_data
 })
 
 # Shuffle the flashcards
 flashcards <- eventReactive(input$start, {
-  req(rv$valid_url)  # Ensure we have a valid URL before proceeding
+  req(rv$valid_url, rv$current_data)  # Ensure we have both valid URL and data
   
   rows = c()
   # Calculate draw probability based on points
-  status_sample = rep(rownames(table()), 10 - pmin(table()$Points, 9))
+  status_sample = rep(seq_len(nrow(rv$current_data)), 
+                     10 - pmin(rv$current_data$Points, 9))
   # Get row number for each flashcard
   for(i in 1:input$words){
     # Get row number of chosen status
-    rows = append(rows, sample(status_sample, 1, replace = T))}
+    rows = append(rows, sample(status_sample, 1, replace = T))
+  }
   rows
 })
+
 
 # Initialize reactive values for card management
 card_num <- reactiveVal(NULL)
@@ -308,7 +315,7 @@ updateWord <- function(word_id, old_points, new_points, new_status) {
               data = date_df,
               range = date_range, 
               col_names = FALSE,
-              reformat = FALSE)  # Preserve formatting
+              reformat = FALSE)
   
   # Update Points
   points_df <- data.frame(value = as.character(new_points))
@@ -319,7 +326,7 @@ updateWord <- function(word_id, old_points, new_points, new_status) {
               data = points_df,
               range = points_range, 
               col_names = FALSE,
-              reformat = FALSE)  # Preserve formatting
+              reformat = FALSE)
   
   # Update Status
   status_df <- data.frame(value = new_status)
@@ -330,7 +337,16 @@ updateWord <- function(word_id, old_points, new_points, new_status) {
               data = status_df,
               range = status_range,
               col_names = FALSE,
-              reformat = FALSE)  # Preserve formatting
+              reformat = FALSE)
+  
+  # Update in-memory data
+  if (!is.null(rv$current_data)) {
+    row_idx <- which(rv$current_data$id == word_id)
+    if (length(row_idx) > 0) {
+      rv$current_data$Points[row_idx] <- new_points
+      rv$current_data$Status[row_idx] <- new_status
+    }
+  }
 }
 
 observeEvent(input$incorrect, {
@@ -341,7 +357,7 @@ observeEvent(input$incorrect, {
   # Get current word details
   current_index <- flashcards()[rv$current_word]
   if (!is.null(current_index) && !is.na(current_index)) {
-    current_word <- table()[current_index,]
+    current_word <- rv$current_data[current_index,]
     print("Current word details:")
     print(current_word)
     
@@ -370,7 +386,7 @@ observeEvent(input$correct, {
   # Get current word details
   current_index <- flashcards()[rv$current_word]
   if (!is.null(current_index) && !is.na(current_index)) {
-    current_word <- table()[current_index,]
+    current_word <- rv$current_data[current_index,]
     print("Current word details:")
     print(current_word)
     
@@ -390,6 +406,7 @@ observeEvent(input$correct, {
     })
   }
 })
+
 
 # renderText("Points:")
 # renderText(points())
