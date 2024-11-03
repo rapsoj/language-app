@@ -29,7 +29,8 @@ This app contains flashcards to help with learning languages. It interacts with 
 # Initialize reactive values
 rv <- reactiveValues(
   valid_url = NULL,
-  sheet_names = NULL
+  sheet_names = NULL,
+  current_word = 1
 )
 
 # Create field to input Google Sheet URL
@@ -219,7 +220,12 @@ outputOptions(output, "reveal_total", suspendWhenHidden = FALSE)
 # Show flashcard
 conditionalPanel(
   condition = "input.start > 0 && output.correct_total + output.incorrect_total < input.words",
-  h3(renderText(table()[i(),]$Meaning[1])),
+  h3(renderText({
+    current_index <- flashcards()[rv$current_word]
+    if (!is.null(current_index) && !is.na(current_index)) {
+      table()[current_index,]$Meaning[1]
+    }
+  })),
   actionButton(inputId = "reveal", label = "Reveal")
 )
 
@@ -289,75 +295,99 @@ output$progress_counter <- renderText({
   paste0("\n", current_card, " / ", total_words)
 })
 
-# Get points of current word
-getCurrentWord <- function() {
-  current_index <- flashcards()[card_num() - 1]
-  list(
-    points = ifelse(is.na(table()[current_index,]$Points[1]), 0,
-                   as.numeric(table()[current_index,]$Points[1])),
-    id = table()[current_index,]$id[1]
-  )
+updateWord <- function(word_id, old_points, new_points, new_status) {
+  print(paste("=== Updating word:", word_id, "==="))
+  print(paste("Points change:", old_points, "->", new_points))
+  
+  # Update Last Reviewed Date
+  date_df <- data.frame(value = as.character(Sys.Date()))
+  date_range <- paste0("F", word_id, ":F", word_id)
+  print(paste("Writing date to range:", date_range))
+  range_write(rv$valid_url, 
+              sheet = input$language,
+              data = date_df,
+              range = date_range, 
+              col_names = FALSE,
+              reformat = FALSE)  # Preserve formatting
+  
+  # Update Points
+  points_df <- data.frame(value = as.character(new_points))
+  points_range <- paste0("G", word_id, ":G", word_id)
+  print(paste("Writing points to range:", points_range))
+  range_write(rv$valid_url, 
+              sheet = input$language,
+              data = points_df,
+              range = points_range, 
+              col_names = FALSE,
+              reformat = FALSE)  # Preserve formatting
+  
+  # Update Status
+  status_df <- data.frame(value = new_status)
+  status_range <- paste0("D", word_id, ":D", word_id)
+  print(paste("Writing status to range:", status_range))
+  range_write(rv$valid_url, 
+              sheet = input$language,
+              data = status_df,
+              range = status_range,
+              col_names = FALSE,
+              reformat = FALSE)  # Preserve formatting
 }
 
-# Update date last reviewed
-observeEvent(input$correct | input$incorrect, {
+observeEvent(input$incorrect, {
   req(rv$valid_url)
-  word <- getCurrentWord()
+  print("=== Handling Incorrect Answer ===")
+  print(paste("Current word number:", rv$current_word))
   
-  range_write(rv$valid_url, sheet = input$language,
-              data = data.frame(x = Sys.Date()) %>% row_to_names(1),
-              range = paste0("F", word$id), reformat = F)
-})
-
-# Add a point if answer is correct
-observeEvent(input$correct, {
-  req(rv$valid_url)
-  word <- getCurrentWord()
-  new_points <- word$points + 1
-  
-  # Update points
-  range_write(rv$valid_url, sheet = input$language,
-              data = data.frame(setNames(
-                data.frame(matrix(0, nrow = 0, ncol = 1)),
-                as.character(new_points)),
-                check.names = F),
-              range = paste0("G", word$id), reformat = F)
-  
-  # Update status
-  if(new_points >= 4) {
-    range_write(rv$valid_url, sheet = input$language,
-                data = data.frame(Learned = character()),
-                range = paste0("D", word$id), reformat = F)
-  } else {
-    range_write(rv$valid_url, sheet = input$language,
-                data = data.frame(Learning = character()),
-                range = paste0("D", word$id), reformat = F)
+  # Get current word details
+  current_index <- flashcards()[rv$current_word]
+  if (!is.null(current_index) && !is.na(current_index)) {
+    current_word <- table()[current_index,]
+    print("Current word details:")
+    print(current_word)
+    
+    # Calculate new values
+    word_id <- current_word$id[1]
+    current_points <- if(is.na(current_word$Points[1])) 0 else as.numeric(current_word$Points[1])
+    new_points <- max(0, current_points - 1)
+    new_status <- if(new_points <= 1) "Unfamiliar" else "Learning"
+    
+    # Update word data
+    updateWord(word_id, current_points, new_points, new_status)
+    
+    # Move to next word
+    isolate({
+      rv$current_word <- rv$current_word + 1
+      print(paste("Moving to word number:", rv$current_word))
+    })
   }
 })
 
-# Remove a point if answer is incorrect
-observeEvent(input$incorrect, {
+observeEvent(input$correct, {
   req(rv$valid_url)
-  word <- getCurrentWord()
-  new_points <- max(0, word$points - 1)
+  print("=== Handling Correct Answer ===")
+  print(paste("Current word number:", rv$current_word))
   
-  # Update points
-  range_write(rv$valid_url, sheet = input$language,
-              data = data.frame(setNames(
-                data.frame(matrix(0, nrow = 0, ncol = 1)),
-                as.character(new_points)),
-                check.names = F),
-              range = paste0("G", word$id), reformat = F)
-  
-  # Update status
-  if(new_points <= 1) {
-    range_write(rv$valid_url, sheet = input$language,
-                data = data.frame(Unfamiliar = character()),
-                range = paste0("D", word$id), reformat = F)
-  } else {
-    range_write(rv$valid_url, sheet = input$language,
-                data = data.frame(Learning = character()),
-                range = paste0("D", word$id), reformat = F)
+  # Get current word details
+  current_index <- flashcards()[rv$current_word]
+  if (!is.null(current_index) && !is.na(current_index)) {
+    current_word <- table()[current_index,]
+    print("Current word details:")
+    print(current_word)
+    
+    # Calculate new values
+    word_id <- current_word$id[1]
+    current_points <- if(is.na(current_word$Points[1])) 0 else as.numeric(current_word$Points[1])
+    new_points <- current_points + 1
+    new_status <- if(new_points >= 4) "Learned" else "Learning"
+    
+    # Update word data
+    updateWord(word_id, current_points, new_points, new_status)
+    
+    # Move to next word
+    isolate({
+      rv$current_word <- rv$current_word + 1
+      print(paste("Moving to word number:", rv$current_word))
+    })
   }
 })
 
